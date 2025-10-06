@@ -430,7 +430,7 @@ def make_train(config):
         runner_state, metric = jax.lax.scan(
             _update_step, (runner_state, 0), None, config["NUM_UPDATES"]
         )
-        return {"runner_state": runner_state}
+        return {"runner_state": runner_state, "metrics": metric}
 
     return train
 
@@ -449,7 +449,7 @@ def main(config):
     train_jit = jax.jit(make_train(config), device=jax.devices()[0])
     out = train_jit(rng)
     
-    updates_x = jnp.arange(out["metrics"]["total_loss"][0].shape[0])
+    """updates_x = jnp.arange(out["metrics"]["total_loss"][0].shape[0])
     loss_table = jnp.stack([updates_x, out["metrics"]["total_loss"].mean(axis=0), out["metrics"]["actor_loss"].mean(axis=0), out["metrics"]["critic_loss"].mean(axis=0), out["metrics"]["entropy"].mean(axis=0), out["metrics"]["ratio"].mean(axis=0)], axis=1)    
     loss_table = wandb.Table(data=loss_table.tolist(), columns=["updates", "total_loss", "actor_loss", "critic_loss", "entropy", "ratio"])
     print('shape', out["metrics"]["returned_episode_returns"][0].shape)
@@ -464,7 +464,7 @@ def main(config):
         "critic_loss_plot": wandb.plot.line(loss_table, "updates", "critic_loss", title="critic_loss_vs_updates"),
         "entropy_plot": wandb.plot.line(loss_table, "updates", "entropy", title="entropy_vs_updates"),
         "ratio_plot": wandb.plot.line(loss_table, "updates", "ratio", title="ratio_vs_updates"),
-    })
+    })"""
 
     return out
 
