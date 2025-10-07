@@ -1,7 +1,7 @@
 "LR": 2.5e-4
 "NUM_ENVS": 16
 "NUM_STEPS": 128
-"TOTAL_TIMESTEPS": 1e5
+"TOTAL_TIMESTEPS": 1e7
 "UPDATE_EPOCHS": 4
 "NUM_MINIBATCHES": 4
 "GAMMA": 0.99
@@ -12,13 +12,15 @@
 "MAX_GRAD_NORM": 0.5
 "ACTIVATION": "tanh"
 "ENV_NAME": "MPE_simple_spread_v3"
-"ENV_KWARGS": {}
-"ANNEAL_LR": True
+"ENV_KWARGS":
+  "num_landmarks": 5
+  "num_agents": 5
+"ANNEAL_LR": true
 "SEED": 30
 "NUM_SEEDS": 10
 
 # WandB Params
 "ENTITY": "dbraga14-princeton-university"
 "PROJECT": "scaling"
-"WANDB_MODE" : "offline"
-"RUN_NAME": "ippo-ff-simple-spread"
+"WANDB_MODE": "offline"
+"RUN_NAME": "ippo-ff-simple-spread_5_landmarks_5_agents"
