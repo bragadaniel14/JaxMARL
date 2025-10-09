@@ -1,7 +1,7 @@
 "LR": 2e-3
 "NUM_ENVS": 16 
 "NUM_STEPS": 128 
-"TOTAL_TIMESTEPS": 2e6
+"TOTAL_TIMESTEPS": 2e7
 "FC_DIM_SIZE": 128
 "GRU_HIDDEN_DIM": 128
 "UPDATE_EPOCHS": 4
@@ -17,11 +17,13 @@
 "ENV_NAME": "MPE_simple_spread_v3"
 "SEED": 1
 "NUM_SEEDS": 2
-"ENV_KWARGS": {}
+"ENV_KWARGS":
+    "num_landmarks": 5
+    "num_agents": 5
 "ANNEAL_LR": True
 
 # WandB Params
 "ENTITY": "dbraga14-princeton-university"
 "PROJECT": "scaling"
 "WANDB_MODE" : "offline"
-"RUN_NAME": "mappo-rnn-simple-spread"
+"RUN_NAME": "mappo-rnn-simple-spread_5_landmarks_5_agents"
