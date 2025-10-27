@@ -461,6 +461,47 @@ def main(config):
         train_jit = jax.jit(make_train(config), device=jax.devices()[0])
         out = train_jit(rng)
         
+        # === LOG FINAL METRICS AND CHARTS ===
+        import json
+        
+        # Create loss charts
+        updates_x = jnp.arange(out["metrics"]["total_loss"][0].shape[0])
+        loss_table = jnp.stack([
+            updates_x, 
+            out["metrics"]["total_loss"].mean(axis=0), 
+            out["metrics"]["actor_loss"].mean(axis=0), 
+            out["metrics"]["critic_loss"].mean(axis=0), 
+            out["metrics"]["entropy"].mean(axis=0), 
+            out["metrics"]["ratio"].mean(axis=0)
+        ], axis=1)
+        loss_table_wandb = wandb.Table(
+            data=loss_table.tolist(), 
+            columns=["updates", "total_loss", "actor_loss", "critic_loss", "entropy", "ratio"]
+        )
+        
+        # Create returns chart
+        returns_updates_x = jnp.arange(out["metrics"]["returned_episode_returns"][0].shape[0])
+        returns_table = jnp.stack([
+            returns_updates_x, 
+            out["metrics"]["returned_episode_returns"].mean(axis=0)
+        ], axis=1)
+        returns_table_wandb = wandb.Table(
+            data=returns_table.tolist(), 
+            columns=["updates", "returns"]
+        )
+        
+        # Log charts and final metrics
+        wandb.log({
+            "charts/total_loss": wandb.plot.line(loss_table_wandb, "updates", "total_loss", title="Total Loss vs Updates"),
+            "charts/actor_loss": wandb.plot.line(loss_table_wandb, "updates", "actor_loss", title="Actor Loss vs Updates"),
+            "charts/critic_loss": wandb.plot.line(loss_table_wandb, "updates", "critic_loss", title="Critic Loss vs Updates"),
+            "charts/entropy": wandb.plot.line(loss_table_wandb, "updates", "entropy", title="Entropy vs Updates"),
+            "charts/ratio": wandb.plot.line(loss_table_wandb, "updates", "ratio", title="Ratio vs Updates"),
+            "charts/returns": wandb.plot.line(returns_table_wandb, "updates", "returns", title="Returns vs Updates"),
+            "final/returns": out["metrics"]["returned_episode_returns"][:, -1].mean(),
+            "final/total_loss": out["metrics"]["total_loss"][:, -1].mean(),
+        })
+        
         # === SAVE FINAL MODEL PARAMETERS TO WANDB ===
         final_train_state = out["runner_state"][0][0]  # (train_state, env_state, ...)
         params_bytes = flax.serialization.to_bytes(final_train_state.params)
@@ -471,7 +512,6 @@ def main(config):
         wandb.save("final_model_params.msgpack")  # Upload to W&B run folder
         
         # === SAVE CONFIGURATION AS JSON ===
-        import json
         config_to_save = {
             "num_agents": config.get("num_agents", 3),
             "num_landmarks": config.get("num_landmarks", 3),
@@ -491,11 +531,170 @@ def main(config):
         # Log final metrics summary
         wandb.summary["num_agents"] = config.get("num_agents", 3)
         wandb.summary["num_landmarks"] = config.get("num_landmarks", 3)
+        wandb.summary["final_returns"] = float(out["metrics"]["returned_episode_returns"][:, -1].mean())
+        wandb.summary["final_total_loss"] = float(out["metrics"]["total_loss"][:, -1].mean())
         
         return out
     finally:
         # Always finish the wandb run to clean up properly
         wandb.finish()
+
+def load_agent_from_wandb(wandb_run_path, config=None):
+    """
+    Load a trained IPPO RNN MPE agent from a wandb run folder.
+    
+    Args:
+        wandb_run_path: Path to wandb run folder (e.g., "wandb/offline-run-20251027_174154-ohjc4ruk")
+                       or just the run ID (e.g., "ohjc4ruk")
+        config: Optional config dict. If None, will try to load from run_config.json
+        
+    Returns:
+        tuple: (params, config, network) where:
+            - params: Loaded model parameters
+            - config: Configuration dict with environment settings
+            - network: ActorCriticRNN network instance
+    """
+    from pathlib import Path
+    import json
+    
+    # Handle both full path and just run ID
+    run_path = Path(wandb_run_path)
+    if not run_path.exists():
+        # Try to find by ID
+        wandb_dir = Path("wandb")
+        matching_runs = list(wandb_dir.glob(f"*-{wandb_run_path}"))
+        if not matching_runs:
+            raise FileNotFoundError(f"Could not find run with ID {wandb_run_path}")
+        run_path = matching_runs[0]
+    
+    # Load model parameters
+    params_path = run_path / "files" / "final_model_params.msgpack"
+    if not params_path.exists():
+        raise FileNotFoundError(f"Model parameters not found at {params_path}")
+    
+    with open(params_path, "rb") as f:
+        params = flax.serialization.from_bytes(None, f.read())
+    
+    # Load config if not provided
+    if config is None:
+        config_path = run_path / "files" / "run_config.json"
+        if config_path.exists():
+            with open(config_path, "r") as f:
+                config_data = json.load(f)
+                config = config_data.get("full_config", config_data)
+        else:
+            raise FileNotFoundError(
+                f"Configuration not found at {config_path}. "
+                "Please provide config manually or ensure run_config.json exists."
+            )
+    
+    # Create environment to get action space
+    env_kwargs = config.get("ENV_KWARGS", {})
+    env = jaxmarl.make(config["ENV_NAME"], **env_kwargs)
+    
+    # Create network
+    network = ActorCriticRNN(env.action_space(env.agents[0]).n, config)
+    
+    return params, config, network
+
+
+def run_and_visualize(wandb_run_path, config=None, num_steps=100, max_env_steps=50, 
+                      seed=42, save_animation=None, return_animation=True):
+    """
+    Load an agent from wandb, run a simulation, and visualize the results.
+    
+    Args:
+        wandb_run_path: Path to wandb run folder or run ID
+        config: Optional config dict. If None, will load from run_config.json
+        num_steps: Number of simulation steps to run
+        max_env_steps: Maximum steps per episode for the environment
+        seed: Random seed for reproducibility
+        save_animation: Optional filename to save animation (e.g., "animation.gif")
+        return_animation: If True, returns HTML animation object for notebooks
+        
+    Returns:
+        HTML animation object if return_animation=True, else None
+    """
+    from IPython.display import HTML
+    
+    # Load the agent
+    print(f"Loading agent from {wandb_run_path}...")
+    params, config, network = load_agent_from_wandb(wandb_run_path, config)
+    
+    env_kwargs = config.get("ENV_KWARGS", {})
+    num_agents = env_kwargs.get("num_agents", 3)
+    num_landmarks = env_kwargs.get("num_landmarks", 3)
+    
+    print(f"Configuration: {num_agents} agents, {num_landmarks} landmarks")
+    
+    # Create environment
+    from jaxmarl.wrappers.baselines import MPELogWrapper
+    env = MPELogWrapper(jaxmarl.make(config["ENV_NAME"], max_steps=max_env_steps, **env_kwargs))
+    
+    # Initialize environment
+    config_sim = config.copy()
+    config_sim['NUM_ENVS'] = 1
+    rng = jax.random.PRNGKey(seed)
+    rngs = jax.random.split(rng, config_sim["NUM_ENVS"])
+    obs, env_state = jax.vmap(env.reset, in_axes=(0,))(rngs)
+    
+    # Initialize network hidden state
+    num_actors = env.num_agents * config_sim["NUM_ENVS"]
+    hstate = ScannedRNN.initialize_carry(num_actors, config["GRU_HIDDEN_DIM"])
+    
+    # Run simulation
+    print(f"Running simulation for {num_steps} steps...")
+    state_seq = [env_state.env_state]
+    
+    for step in range(num_steps):
+        # Batchify observations for RNN
+        obs_batch = jnp.stack([obs[a] for a in env.agents])
+        obs_batch = obs_batch.transpose(1, 0, 2).reshape(-1, obs_batch.shape[-1])
+        dones = jnp.zeros((num_actors,), dtype=jnp.float32)
+        ac_in = (obs_batch[None, :, :], dones[None, :])  # add time dim for scan
+        
+        # Get actions from network
+        hstate, pi, _ = network.apply(params, hstate, ac_in)
+        rng, _rng = jax.random.split(rng)
+        actions = pi.sample(seed=_rng)
+        
+        # Unbatch actions for environment
+        actions = actions.reshape(config_sim["NUM_ENVS"], env.num_agents)
+        act_dict = {a: np.array(actions[:, i]) for i, a in enumerate(env.agents)}
+        
+        # Step environment
+        rng_step = jax.random.split(_rng, config_sim["NUM_ENVS"])
+        obs, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0))(
+            rng_step, env_state, act_dict
+        )
+        
+        state_seq.append(env_state.env_state)
+    
+    print(f"Simulation complete. Creating visualization...")
+    
+    # Visualize
+    try:
+        from baselines.Custom.simple_spread_visualizer import MPEVisualizer
+    except ImportError:
+        # Fallback if visualizer is in different location
+        import sys
+        sys.path.insert(0, "baselines/Custom")
+        from simple_spread_visualizer import MPEVisualizer
+    
+    env_viz = jaxmarl.make(config["ENV_NAME"], **env_kwargs)
+    viz = MPEVisualizer(env_viz, state_seq)
+    
+    if save_animation:
+        print(f"Saving animation to {save_animation}...")
+        ani = viz.animate(save_fname=save_animation, view=False)
+        print(f"Animation saved!")
+    
+    if return_animation:
+        return viz.animate()
+    else:
+        viz.animate(view=False)
+        return None
+
 
 if __name__ == "__main__":
     main()
