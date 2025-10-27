@@ -23,7 +23,7 @@
 "ANNEAL_LR": True
 
 # WandB Params
-"ENTITY": "dbraga14-princeton-university"
-"PROJECT": "scaling"
+"ENTITY": "emiecz-princeton"
+"PROJECT": "ScalingLaws"
 "WANDB_MODE" : "offline"
 "RUN_NAME": "mappo-rnn-simple-spread_5_landmarks_5_agents"

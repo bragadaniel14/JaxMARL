@@ -4,7 +4,7 @@
 "NUM_STEPS": 128
 "FC_DIM_SIZE": 128
 "GRU_HIDDEN_DIM": 128
-"TOTAL_TIMESTEPS": 1e7
+"TOTAL_TIMESTEPS": 1e3
 "UPDATE_EPOCHS": 4
 "NUM_MINIBATCHES": 2
 "GAMMA": 0.99
@@ -17,9 +17,10 @@
 "ACTIVATION": "tanh"
 "ANNEAL_LR": True
 "SEED": 30
+"ENV_KWARGS": {}
 
 # WandB Params
-"ENTITY": "dbraga14-princeton-university"
-"PROJECT": "scaling"
+"ENTITY": "emiecz-princeton"
+"PROJECT": "ScalingLaws"
 "WANDB_MODE" : "offline"
 "RUN_NAME": "ippo-rnn-simple-spread"
