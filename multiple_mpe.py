@@ -30,6 +30,7 @@ if __name__ == "__main__":
     for num_agents in range(1,6):
         for num_landmarks in range(1,6):
             start = time.time()
+            print(f"Start to run {num_agents} {num_landmarks}")
             config["ENV_KWARGS"]["num_agents"] = num_agents
             config["ENV_KWARGS"]["num_landmarks"] = num_landmarks
             config['RUN_NAME'] = f"{args.algo_type}-spread_{num_landmarks}_landmarks_{num_agents}_agents" 

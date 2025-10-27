@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+from IPython.display import HTML, display
 from typing import Optional
 import numpy as np
 

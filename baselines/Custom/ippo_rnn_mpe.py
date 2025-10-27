@@ -111,7 +111,8 @@ def unbatchify(x: jnp.ndarray, agent_list, num_envs, num_actors):
 
 
 def make_train(config):
-    env = jaxmarl.make(config["ENV_NAME"])
+    env_kwargs = config.get("ENV_KWARGS", {})
+    env = jaxmarl.make(config["ENV_NAME"], **env_kwargs)
     
     config["NUM_ACTORS"] = env.num_agents * config["NUM_ENVS"]
     config["NUM_UPDATES"] = (
@@ -438,28 +439,63 @@ def make_train(config):
 
 def main(config):
     config = OmegaConf.to_container(config)
+    
+    # Add environment configuration details to wandb config for easy retrieval
+    env_kwargs = config.get("ENV_KWARGS", {})
+    if env_kwargs:
+        config["num_agents"] = env_kwargs.get("num_agents", 3)  # default 3
+        config["num_landmarks"] = env_kwargs.get("num_landmarks", 3)  # default 3
+    
     wandb.init(
         entity=config["ENTITY"],
         project=config["PROJECT"],
         name=config["RUN_NAME"],
         tags=["IPPO", "RNN"],
         config=config,
-        mode=config["WANDB_MODE"]
+        mode=config["WANDB_MODE"],
+        reinit=True  # Allow multiple wandb.init() calls in same process
     )
-    rng = jax.random.PRNGKey(config["SEED"])
-    train_jit = jax.jit(make_train(config), device=jax.devices()[0])
-    out = train_jit(rng)
     
-    # === SAVE FINAL MODEL PARAMETERS TO WANDB ===
-    final_train_state = out["runner_state"][0][0]  # (train_state, env_state, ...)
-    params_bytes = flax.serialization.to_bytes(final_train_state.params)
-    
-    # Save as artifact
-    with open("final_model_params.msgpack", "wb") as f:
-        f.write(params_bytes)
-    wandb.save("final_model_params.msgpack")  # Upload to W&B run folder
-
-    return out
+    try:
+        rng = jax.random.PRNGKey(config["SEED"])
+        train_jit = jax.jit(make_train(config), device=jax.devices()[0])
+        out = train_jit(rng)
+        
+        # === SAVE FINAL MODEL PARAMETERS TO WANDB ===
+        final_train_state = out["runner_state"][0][0]  # (train_state, env_state, ...)
+        params_bytes = flax.serialization.to_bytes(final_train_state.params)
+        
+        # Save model params
+        with open("final_model_params.msgpack", "wb") as f:
+            f.write(params_bytes)
+        wandb.save("final_model_params.msgpack")  # Upload to W&B run folder
+        
+        # === SAVE CONFIGURATION AS JSON ===
+        import json
+        config_to_save = {
+            "num_agents": config.get("num_agents", 3),
+            "num_landmarks": config.get("num_landmarks", 3),
+            "ENV_NAME": config.get("ENV_NAME"),
+            "ENV_KWARGS": config.get("ENV_KWARGS", {}),
+            "SEED": config.get("SEED"),
+            "TOTAL_TIMESTEPS": config.get("TOTAL_TIMESTEPS"),
+            "NUM_ENVS": config.get("NUM_ENVS"),
+            "LR": config.get("LR"),
+            "RUN_NAME": config.get("RUN_NAME"),
+            "full_config": config  # Save entire config for reference
+        }
+        with open("run_config.json", "w") as f:
+            json.dump(config_to_save, f, indent=2)
+        wandb.save("run_config.json")  # Upload to W&B run folder
+        
+        # Log final metrics summary
+        wandb.summary["num_agents"] = config.get("num_agents", 3)
+        wandb.summary["num_landmarks"] = config.get("num_landmarks", 3)
+        
+        return out
+    finally:
+        # Always finish the wandb run to clean up properly
+        wandb.finish()
 
 if __name__ == "__main__":
     main()
