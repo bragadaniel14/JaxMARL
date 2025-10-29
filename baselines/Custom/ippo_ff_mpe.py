@@ -2,6 +2,7 @@
 Based on the PureJaxRL Implementation of PPO
 """
 
+import flax
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
@@ -315,7 +316,15 @@ def main(config):
         tags=["IPPO", "FF"],
         config=config,
         mode=config["WANDB_MODE"],
+        reinit=True,  # Allow multiple runs in same session
     )
+
+    # Save config as JSON for easy access
+    import json
+    import os
+    config_save_path = os.path.join(wandb.run.dir, "run_config.json")
+    with open(config_save_path, 'w') as f:
+        json.dump(config, f, indent=2)
 
     rng = jax.random.PRNGKey(config["SEED"])
     rngs = jax.random.split(rng, config["NUM_SEEDS"])    
@@ -337,6 +346,19 @@ def main(config):
         "entropy_plot": wandb.plot.line(loss_table, "updates", "entropy", title="entropy_vs_updates"),
         "ratio_plot": wandb.plot.line(loss_table, "updates", "ratio", title="ratio_vs_updates"),
     })
+
+    # === SAVE FINAL MODEL PARAMETERS TO WANDB ===
+    # In feedforward version, runner_state is (train_state, env_state, last_obs, rng)
+    # After vmap, it becomes a tuple where each element has shape (NUM_SEEDS, ...)
+    # So out["runner_state"][0] gives train_state array, [0] gets first seed
+    final_train_state = jax.tree_map(lambda x: x[0], out["runner_state"][0])
+    params_bytes = flax.serialization.to_bytes(final_train_state.params)
+    
+    # Save as artifact
+    with open("final_model_params.msgpack", "wb") as f:
+        f.write(params_bytes)
+    wandb.save("final_model_params.msgpack")  # Upload to W&B run folder
+    wandb.finish()
 
     return out
 
