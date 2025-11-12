@@ -1,5 +1,15 @@
 """
 Based on PureJaxRL Implementation of IPPO, with changes to give a centralised critic.
+
+Functions:
+    - main(config): Train a MAPPO-RNN agent and save to wandb
+    - load_params_from_path(saved_path): Load trained model parameters and config
+    - evaluate_policy(params, env_config, ...): Evaluate a trained policy
+    - plot_simulation(saved_path, ...): Load and visualize a trained model
+
+Example usage for visualization:
+    from baselines.Custom import mappo_rnn_mpe
+    anim = mappo_rnn_mpe.plot_simulation(saved_path="wandb/offline-run-XXXXX")
 """
 
 import jax
@@ -24,6 +34,9 @@ from jaxmarl.environments.multi_agent_env import MultiAgentEnv, State
 import wandb
 import functools
 import matplotlib.pyplot as plt
+import json
+from pathlib import Path
+import flax
 
     
 class MPEWorldStateWrapper(JaxMARLWrapper):
@@ -535,6 +548,13 @@ def make_train(config):
 def main(config):
 
     config = OmegaConf.to_container(config)
+    
+    # Add environment configuration details to wandb config for easy retrieval
+    env_kwargs = config.get("ENV_KWARGS", {})
+    if env_kwargs:
+        config["num_agents"] = env_kwargs.get("num_agents", 3)
+        config["num_landmarks"] = env_kwargs.get("num_landmarks", 3)
+    
     wandb.init(
         entity=config["ENTITY"],
         project=config["PROJECT"],
@@ -542,37 +562,274 @@ def main(config):
         tags=["MAPPO", "RNN", config["ENV_NAME"]],
         config=config,
         mode=config["WANDB_MODE"],
-        
-        
     )
-    rng = jax.random.PRNGKey(config["SEED"])
-    with jax.disable_jit(False):
-        train_jit = jax.jit(make_train(config)) 
-        out = train_jit(rng)
-
-    # === SAVE FINAL MODEL PARAMETERS TO WANDB ===
-    # runner_state structure: ((actor_train_state, critic_train_state), env_state, obsv, dones, hstates, rng)
-    final_actor_train_state = out["runner_state"][0][0][0]
-    final_critic_train_state = out["runner_state"][0][0][1]
-
-    # Serialize both actor and critic parameters
-    import flax.serialization
-    actor_params_bytes = flax.serialization.to_bytes(final_actor_train_state.params)
-    critic_params_bytes = flax.serialization.to_bytes(final_critic_train_state.params)
-
-    # Save as artifacts
-    with open("final_actor_params.msgpack", "wb") as f:
-        f.write(actor_params_bytes)
-    with open("final_critic_params.msgpack", "wb") as f:
-        f.write(critic_params_bytes)
-
-    wandb.save("final_actor_params.msgpack")
-    wandb.save("final_critic_params.msgpack")
-
-    wandb.finish()
     
+    try:
+        rng = jax.random.PRNGKey(config["SEED"])
+        with jax.disable_jit(False):
+            train_jit = jax.jit(make_train(config)) 
+            out = train_jit(rng)
 
-    return out
+        # === SAVE FINAL MODEL PARAMETERS TO WANDB ===
+        # runner_state structure: ((actor_train_state, critic_train_state), env_state, obsv, dones, hstates, rng)
+        final_actor_train_state = out["runner_state"][0][0][0]
+        final_critic_train_state = out["runner_state"][0][0][1]
+
+        # Serialize both actor and critic parameters
+        actor_params_bytes = flax.serialization.to_bytes(final_actor_train_state.params)
+        critic_params_bytes = flax.serialization.to_bytes(final_critic_train_state.params)
+
+        # Save as artifacts
+        with open("final_actor_params.msgpack", "wb") as f:
+            f.write(actor_params_bytes)
+        with open("final_critic_params.msgpack", "wb") as f:
+            f.write(critic_params_bytes)
+
+        wandb.save("final_actor_params.msgpack")
+        wandb.save("final_critic_params.msgpack")
+        
+        # Save config with environment details to JSON for easy loading
+        config_to_save = {
+            "num_agents": config.get("num_agents", 3),
+            "num_landmarks": config.get("num_landmarks", 3),
+            "ENV_NAME": config["ENV_NAME"],
+            "GRU_HIDDEN_DIM": config["GRU_HIDDEN_DIM"],
+            "FC_DIM_SIZE": config["FC_DIM_SIZE"],
+            "algo_type": "mappo_rnn_mpe"
+        }
+        with open("env_config.json", "w") as f:
+            json.dump(config_to_save, f, indent=2)
+        wandb.save("env_config.json")
+        
+        # Log final metrics summary
+        wandb.summary["num_agents"] = config.get("num_agents", 3)
+        wandb.summary["num_landmarks"] = config.get("num_landmarks", 3)
+        
+        return out
+    finally:
+        wandb.finish()
+
+
+def load_params_from_path(path: str):
+    """
+    Load actor params, critic params, and environment configuration from a wandb run directory.
+    
+    Args:
+        path: Path to the wandb run directory containing final_actor_params.msgpack, 
+              final_critic_params.msgpack, and env_config.json
+    
+    Returns:
+        tuple: (actor_params, critic_params, env_config)
+    """
+    path = Path(path)
+    
+    # Load actor parameters
+    actor_params_path = path / "final_actor_params.msgpack"
+    with open(actor_params_path, "rb") as f:
+        actor_params_bytes = f.read()
+    actor_params = flax.serialization.from_bytes(None, actor_params_bytes)
+    
+    # Load critic parameters
+    critic_params_path = path / "final_critic_params.msgpack"
+    with open(critic_params_path, "rb") as f:
+        critic_params_bytes = f.read()
+    critic_params = flax.serialization.from_bytes(None, critic_params_bytes)
+    
+    # Load environment configuration
+    config_path = path / "env_config.json"
+    with open(config_path, "r") as f:
+        env_config = json.load(f)
+    
+    return actor_params, critic_params, env_config
+
+
+def evaluate_policy(actor_params, critic_params, env_config, num_episodes=100, seed=0, max_steps=100):
+    """
+    Evaluate a trained MAPPO policy with centralized critic.
+    
+    Args:
+        actor_params: Actor network parameters
+        critic_params: Critic network parameters
+        env_config: Dictionary with environment configuration (num_agents, num_landmarks, ENV_NAME, etc.)
+        num_episodes: Number of episodes to evaluate
+        seed: Random seed for evaluation
+        max_steps: Maximum steps per episode
+    
+    Returns:
+        dict: Contains 'returns' (list of episode returns) and 'lengths' (list of episode lengths)
+    """
+    rng = jax.random.PRNGKey(seed)
+    
+    # Create environment with matching configuration
+    env_name = env_config.get("ENV_NAME", "MPE_simple_spread_v3")
+    num_agents = env_config["num_agents"]
+    num_landmarks = env_config["num_landmarks"]
+    
+    # Create environment with world state wrapper for centralized critic
+    base_env = jaxmarl.make(
+        env_name, 
+        num_agents=num_agents, 
+        num_landmarks=num_landmarks,
+        max_steps=max_steps
+    )
+    env = MPEWorldStateWrapper(base_env)
+    
+    # Initialize networks with correct architecture
+    gru_hidden_dim = env_config.get("GRU_HIDDEN_DIM", 128)
+    fc_dim_size = env_config.get("FC_DIM_SIZE", 128)
+    
+    actor_network = ActorRNN(env.action_space(env.agents[0]).n, gru_hidden_dim, fc_dim_size)
+    critic_network = CriticRNN(gru_hidden_dim, fc_dim_size)
+    
+    def evaluate_episode(rng):
+        # Reset environment
+        rng, reset_rng = jax.random.split(rng)
+        obs, state = env.reset(reset_rng)
+        
+        # Initialize hidden states for all agents
+        rng, actor_rng, critic_rng = jax.random.split(rng, 3)
+        
+        # Actor hidden state: one per agent
+        actor_hstate = ScannedRNN.initialize_carry(gru_hidden_dim, num_agents)
+        
+        # Critic hidden state: single centralized critic
+        critic_hstate = ScannedRNN.initialize_carry(gru_hidden_dim, 1)
+        
+        episode_return = 0.0
+        episode_length = 0
+        done = False
+        
+        for step in range(max_steps):
+            if done:
+                break
+            
+            # Get observations
+            obs_array = jnp.array([obs[agent] for agent in env.agents])
+            
+            # Actor forward pass (per agent)
+            actor_hstate, pi = actor_network.apply(actor_params, actor_hstate, obs_array)
+            
+            # Greedy action selection
+            actions = jnp.argmax(pi.logits, axis=-1).squeeze()
+            
+            # Create action dictionary
+            action_dict = {agent: int(actions[i]) for i, agent in enumerate(env.agents)}
+            
+            # Step environment
+            rng, step_rng = jax.random.split(rng)
+            obs, state, rewards, dones, _ = env.step(step_rng, state, action_dict)
+            
+            # Accumulate rewards across all agents
+            total_reward = sum(rewards.values())
+            episode_return += total_reward
+            episode_length += 1
+            
+            # Check if episode is done
+            done = dones["__all__"]
+        
+        return episode_return, episode_length
+    
+    # Run multiple episodes
+    returns = []
+    lengths = []
+    
+    for _ in range(num_episodes):
+        rng, eval_rng = jax.random.split(rng)
+        ep_return, ep_length = evaluate_episode(eval_rng)
+        returns.append(float(ep_return))
+        lengths.append(int(ep_length))
+    
+    return {
+        "returns": returns,
+        "lengths": lengths,
+        "mean_return": float(jnp.mean(jnp.array(returns))),
+        "std_return": float(jnp.std(jnp.array(returns))),
+        "mean_length": float(jnp.mean(jnp.array(lengths))),
+        "std_length": float(jnp.std(jnp.array(lengths)))
+    }
+
+
+def plot_simulation(actor_params, critic_params, env_config, seed=0, max_steps=100):
+    """
+    Run and visualize a single episode with the trained MAPPO policy.
+    
+    Args:
+        actor_params: Actor network parameters
+        critic_params: Critic network parameters
+        env_config: Dictionary with environment configuration
+        seed: Random seed for the episode
+        max_steps: Maximum steps for the episode
+    
+    Returns:
+        tuple: (trajectory, final_state) where trajectory is a list of (obs, action, reward, done) tuples
+    """
+    rng = jax.random.PRNGKey(seed)
+    
+    # Create environment with matching configuration
+    env_name = env_config.get("ENV_NAME", "MPE_simple_spread_v3")
+    num_agents = env_config["num_agents"]
+    num_landmarks = env_config["num_landmarks"]
+    
+    base_env = jaxmarl.make(
+        env_name,
+        num_agents=num_agents,
+        num_landmarks=num_landmarks,
+        max_steps=max_steps
+    )
+    env = MPEWorldStateWrapper(base_env)
+    
+    # Initialize networks
+    gru_hidden_dim = env_config.get("GRU_HIDDEN_DIM", 128)
+    fc_dim_size = env_config.get("FC_DIM_SIZE", 128)
+    
+    actor_network = ActorRNN(env.action_space(env.agents[0]).n, gru_hidden_dim, fc_dim_size)
+    critic_network = CriticRNN(gru_hidden_dim, fc_dim_size)
+    
+    # Reset environment
+    rng, reset_rng = jax.random.split(rng)
+    obs, state = env.reset(reset_rng)
+    
+    # Initialize hidden states
+    actor_hstate = ScannedRNN.initialize_carry(gru_hidden_dim, num_agents)
+    critic_hstate = ScannedRNN.initialize_carry(gru_hidden_dim, 1)
+    
+    trajectory = []
+    done = False
+    
+    for step in range(max_steps):
+        if done:
+            break
+        
+        # Get observations
+        obs_array = jnp.array([obs[agent] for agent in env.agents])
+        
+        # Actor forward pass
+        actor_hstate, pi = actor_network.apply(actor_params, actor_hstate, obs_array)
+        
+        # Sample actions (stochastic for visualization diversity)
+        rng, action_rng = jax.random.split(rng)
+        actions = pi.sample(seed=action_rng).squeeze()
+        
+        # Create action dictionary
+        action_dict = {agent: int(actions[i]) for i, agent in enumerate(env.agents)}
+        
+        # Step environment
+        rng, step_rng = jax.random.split(rng)
+        next_obs, state, rewards, dones, info = env.step(step_rng, state, action_dict)
+        
+        # Store transition
+        trajectory.append({
+            "obs": obs,
+            "actions": action_dict,
+            "rewards": rewards,
+            "dones": dones,
+            "state": state
+        })
+        
+        obs = next_obs
+        done = dones["__all__"]
+    
+    return trajectory, state
 
     
 if __name__=="__main__":

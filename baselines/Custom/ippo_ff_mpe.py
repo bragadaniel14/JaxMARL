@@ -1,5 +1,15 @@
 """ 
 Based on the PureJaxRL Implementation of PPO
+
+Functions:
+    - main(config): Train an IPPO-FF agent and save to wandb
+    - load_params_from_path(saved_path): Load trained model parameters and config
+    - evaluate_policy(params, env_config, ...): Evaluate a trained policy
+    - plot_simulation(saved_path, ...): Load and visualize a trained model
+
+Example usage for visualization:
+    from baselines.Custom import ippo_ff_mpe
+    anim = ippo_ff_mpe.plot_simulation(saved_path="wandb/offline-run-XXXXX")
 """
 
 import flax
@@ -18,6 +28,9 @@ import matplotlib.pyplot as plt
 import hydra
 from omegaconf import OmegaConf
 import wandb
+import os
+import json
+from pathlib import Path
 
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
@@ -308,6 +321,16 @@ def make_train(config):
 
 def main(config):
     config = OmegaConf.to_container(config) 
+    
+    # Add environment configuration details to wandb config for easy retrieval
+    env_kwargs = config.get("ENV_KWARGS", {})
+    if env_kwargs:
+        config["num_agents"] = env_kwargs.get("num_agents", 3)
+        config["num_landmarks"] = env_kwargs.get("num_landmarks", 3)
+    run_name = f"ippo_ff_mpe-offline/agents{config.get('num_agents', 3)}-landmarks{config.get('num_landmarks', 3)}"
+    wandb_dir = Path(run_name)
+    wandb_dir.mkdir(parents=True, exist_ok=True)
+    config["WANDB_DIR"] = str(wandb_dir)
 
     wandb.init(
         entity=config["ENTITY"],
@@ -316,15 +339,9 @@ def main(config):
         tags=["IPPO", "FF"],
         config=config,
         mode=config["WANDB_MODE"],
+        dir=config["WANDB_DIR"],
         reinit=True,  # Allow multiple runs in same session
     )
-
-    # Save config as JSON for easy access
-    import json
-    import os
-    config_save_path = os.path.join(wandb.run.dir, "run_config.json")
-    with open(config_save_path, 'w') as f:
-        json.dump(config, f, indent=2)
 
     rng = jax.random.PRNGKey(config["SEED"])
     rngs = jax.random.split(rng, config["NUM_SEEDS"])    
@@ -358,9 +375,245 @@ def main(config):
     with open("final_model_params.msgpack", "wb") as f:
         f.write(params_bytes)
     wandb.save("final_model_params.msgpack")  # Upload to W&B run folder
+    
+    # Save config with environment details to JSON for easy loading
+    config_to_save = {
+        "num_agents": config.get("num_agents", 3),
+        "num_landmarks": config.get("num_landmarks", 3),
+        "ENV_NAME": config["ENV_NAME"],
+        "ACTIVATION": config.get("ACTIVATION", "tanh"),
+        "algo_type": "ippo_ff_mpe"
+    }
+    with open("env_config.json", "w") as f:
+        json.dump(config_to_save, f, indent=2)
+    wandb.save("env_config.json")
+    
+    # Log final metrics summary
+    wandb.summary["num_agents"] = config.get("num_agents", 3)
+    wandb.summary["num_landmarks"] = config.get("num_landmarks", 3)
     wandb.finish()
-
     return out
+    
+
+
+def load_params_from_path(saved_path):
+    """Load model parameters from a given path."""
+    saved_path = Path(saved_path)
+    if saved_path.name != "files":
+        saved_path = saved_path / "files"
+    saved_path = saved_path.resolve()
+    params_file = saved_path / "final_model_params.msgpack"
+    if not params_file.exists():
+        raise ValueError(f"Model parameters file not found: {params_file}")
+    
+    print(f"Loading model parameters from: {params_file}")
+    with open(params_file, "rb") as f:
+        params = flax.serialization.from_bytes(None, f.read())
+
+    env_config_file = saved_path / "env_config.json"
+    if not env_config_file.exists():
+        raise ValueError(f"Environment config file not found: {env_config_file}")
+    print(f"Loading environment config from: {env_config_file}")
+    with open(env_config_file, "r") as f:
+        env_config = json.load(f)
+    return params, env_config
+
+
+def evaluate_policy(params, env_config, num_eval_episodes=100, eval_seed=42, max_steps=100):
+    """
+    Evaluate a trained IPPO-FF policy on fresh episodes using greedy (deterministic) actions.
+    
+    Args:
+        params: Trained model parameters
+        env_config: Environment configuration dict with keys like:
+                   'num_agents', 'num_landmarks', 'ENV_NAME', 'ACTIVATION'
+        num_eval_episodes: Number of episodes to evaluate
+        eval_seed: Random seed for evaluation (different from training)
+        max_steps: Maximum steps per episode (default: 100)
+    
+    Returns:
+        tuple: (metrics dict, episode_returns array, episode_lengths array)
+    """
+    
+    # Build config dict for the network
+    config = {
+        "ENV_NAME": env_config.get("ENV_NAME", "MPE_simple_spread_v3"),
+        "ACTIVATION": env_config.get("ACTIVATION", "tanh"),
+        "ENV_KWARGS": {
+            "num_agents": env_config.get("num_agents", 3),
+            "num_landmarks": env_config.get("num_landmarks", 3)
+        }
+    }
+    
+    # Create environment with appropriate max_steps
+    env = LogWrapper(jaxmarl.make(config["ENV_NAME"], max_steps=max_steps, **config["ENV_KWARGS"]))
+    network = ActorCritic(env.action_space(env.agents[0]).n, activation=config["ACTIVATION"])
+    
+    # Use single environment for evaluation
+    num_envs = 1
+    num_actors = env.num_agents * num_envs
+    
+    # Storage for results
+    episode_returns = []
+    episode_lengths = []
+    
+    rng = jax.random.PRNGKey(eval_seed)
+    
+    for episode_idx in range(num_eval_episodes):
+        # Reset environment
+        rng, reset_rng = jax.random.split(rng)
+        obs, env_state = env.reset(reset_rng)
+        
+        episode_reward = 0.0
+        episode_length = 0
+        done = False
+        
+        while not done and episode_length < max_steps:
+            # Prepare observation batch
+            obs_batch = batchify(obs, env.agents, num_actors)
+            
+            # Get action from policy (feedforward - no hidden state)
+            pi, value = network.apply(params, obs_batch)
+            
+            # Deterministic action (greedy)
+            actions = jnp.argmax(pi.logits, axis=-1)
+            
+            # Unbatch actions for environment
+            act_dict = unbatchify(actions, env.agents, num_envs, env.num_agents)
+            act_dict = {k: int(v.squeeze()) for k, v in act_dict.items()}
+            
+            # Step environment
+            rng, step_rng = jax.random.split(rng)
+            obs, env_state, reward, done_dict, info = env.step(step_rng, env_state, act_dict)
+            
+            # Accumulate rewards (sum over all agents)
+            episode_reward += sum(reward.values())
+            episode_length += 1
+            
+            # Check if episode is done
+            done = done_dict["__all__"]
+        
+        episode_returns.append(float(episode_reward))
+        episode_lengths.append(episode_length)
+        
+        if (episode_idx + 1) % 20 == 0:
+            print(f"Evaluated {episode_idx + 1}/{num_eval_episodes} episodes...")
+    
+    # Compute statistics
+    episode_returns = np.array(episode_returns)
+    episode_lengths = np.array(episode_lengths)
+    
+    metrics = {
+        "mean_return": episode_returns.mean(),
+        "std_return": episode_returns.std(),
+        "min_return": episode_returns.min(),
+        "max_return": episode_returns.max(),
+        "median_return": np.median(episode_returns),
+        "mean_episode_length": episode_lengths.mean(),
+        "std_episode_length": episode_lengths.std(),
+        "num_episodes": num_eval_episodes,
+        "max_steps": max_steps
+    }
+    
+    return metrics, episode_returns, episode_lengths
+
+
+def plot_simulation(saved_path, max_steps=100, num_episodes=1, seed=42):
+    """
+    Load a trained IPPO-FF model from an offline wandb path and visualize it.
+    
+    Args:
+        saved_path: Path to the offline wandb run directory (required)
+        max_steps: Maximum number of steps to simulate (default: 100)
+        num_episodes: Number of episodes to visualize (default: 1)
+        seed: Random seed for reproducibility (default: 42)
+    
+    Returns:
+        Animation object from MPEVisualizer
+    """
+    # Load parameters and config
+    params, env_config = load_params_from_path(saved_path)
+    
+    num_agents = env_config.get("num_agents", 3)
+    num_landmarks = env_config.get("num_landmarks", 3)
+    env_name = env_config.get("ENV_NAME", "MPE_simple_spread_v3")
+    activation = env_config.get("ACTIVATION", "tanh")
+    
+    print(f"Environment config: num_agents={num_agents}, num_landmarks={num_landmarks}")
+    
+    # Create environment
+    env_kwargs = {"num_agents": num_agents, "num_landmarks": num_landmarks}
+    env = LogWrapper(jaxmarl.make(env_name, max_steps=max_steps, **env_kwargs))
+    
+    # Create network
+    network = ActorCritic(env.action_space(env.agents[0]).n, activation=activation)
+    
+    # Initialize RNG
+    rng = jax.random.PRNGKey(seed)
+    num_envs = 1
+    num_actors = env.num_agents * num_envs
+    
+    # Run simulation
+    all_state_sequences = []
+    
+    for episode_idx in range(num_episodes):
+        print(f"Running episode {episode_idx + 1}/{num_episodes}...")
+        
+        # Reset environment with vmap (even for single env)
+        rng, reset_rng = jax.random.split(rng)
+        rngs = jax.random.split(reset_rng, num_envs)
+        obs, env_state = jax.vmap(env.reset, in_axes=(0,))(rngs)
+        
+        # Collect states
+        state_seq = [env_state.env_state]
+        
+        for step in range(max_steps):
+            # Batchify observations matching training format
+            obs_batch = jnp.stack([obs[a] for a in env.agents])
+            obs_batch = obs_batch.transpose(1, 0, 2).reshape(-1, obs_batch.shape[-1])
+            
+            # Get action from policy (feedforward - no hidden state)
+            pi, _ = network.apply(params, obs_batch)
+            
+            # Sample actions
+            rng, action_rng = jax.random.split(rng)
+            actions = pi.sample(seed=action_rng)
+            
+            # Reshape actions for environment (num_envs, num_agents)
+            actions = actions.reshape(num_envs, env.num_agents)
+            act_dict = {a: np.array(actions[:, i]) for i, a in enumerate(env.agents)}
+            
+            # Step environment with vmap
+            rng_step = jax.random.split(action_rng, num_envs)
+            obs, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0))(
+                rng_step, env_state, act_dict
+            )
+            
+            state_seq.append(env_state.env_state)
+            
+            # Check if episode is done
+            if done["__all__"][0]:
+                print(f"Episode {episode_idx + 1} finished at step {step + 1}")
+                break
+        
+        all_state_sequences.append(state_seq)
+    
+    # Visualize
+    print("Creating visualization...")
+    try:
+        from baselines.Custom.simple_spread_visualizer import MPEVisualizer
+    except ImportError as e:
+        raise ImportError(
+            "MPEVisualizer not found. Make sure baselines.Custom.simple_spread_visualizer is available."
+        ) from e
+    
+    # Create base environment for visualization
+    env_base = jaxmarl.make(env_name, **env_kwargs)
+    viz = MPEVisualizer(env_base, all_state_sequences[0])
+    anim = viz.animate()
+    
+    print("Visualization complete!")
+    return anim
 
 
 if __name__ == "__main__":
