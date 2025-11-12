@@ -21,6 +21,8 @@ if __name__ == "__main__":
     parser.add_argument("--algo_type", type=str, default="ippo_ff_mpe")
     parser.add_argument("--wandb_folder", type=str, default=None)
     parser.add_argument("--log_file", type=str, default="training.log")
+    parser.add_argument("--range_agents", type=int, default=5, help="Range of number of agents to run (inclusive, exclusive)")
+    parser.add_argument("--range_landmarks", type=int, default=5, help="Range of number of landmarks to run (inclusive, exclusive)")
     args = parser.parse_args()
     algo, config = algo_and_config_map[args.algo_type]
 
@@ -31,8 +33,8 @@ if __name__ == "__main__":
     print(f"We are dealing with device {jax.devices()}")
     logging.info(f"We are dealing with device {jax.devices()}")    
 
-    for num_agents in range(1,6):
-        for num_landmarks in range(1,6):
+    for num_agents in range(1, args.range_agents+1):
+        for num_landmarks in range(1, args.range_landmarks+1):
             start = time.time()
             logging.info(f"Start to run {num_agents} {num_landmarks}")
             print(f"Start to run {num_agents} {num_landmarks}")
