@@ -32,6 +32,7 @@ import os
 import json
 from pathlib import Path
 
+
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
     activation: str = "tanh"
@@ -327,8 +328,10 @@ def main(config):
     if env_kwargs:
         config["num_agents"] = env_kwargs.get("num_agents", 3)
         config["num_landmarks"] = env_kwargs.get("num_landmarks", 3)
-    run_name = f"ippo_ff_mpe-offline/agents{config.get('num_agents', 3)}-landmarks{config.get('num_landmarks', 3)}"
-    wandb_dir = Path(run_name)
+
+    default_folder = f"ippo_ff_mpe-offline/agents{config.get('num_agents', 3)}-landmarks{config.get('num_landmarks', 3)}"
+    run_folder = config.get("WANDB_DIR", default_folder)
+    wandb_dir = Path(run_folder)
     wandb_dir.mkdir(parents=True, exist_ok=True)
     config["WANDB_DIR"] = str(wandb_dir)
 
