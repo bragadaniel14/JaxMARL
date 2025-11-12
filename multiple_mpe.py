@@ -5,16 +5,18 @@ from omegaconf import OmegaConf
 import argparse
 import jax
 import time
+import logging
 
 
 
 
 if __name__ == "__main__":
     print(f"We are dealing with device {jax.devices()}")
+    logging.info(f"We are dealing with device {jax.devices()}")
     algo_and_config_map = {
         "ippo_ff_mpe": (ippo_ff_mpe, OmegaConf.load(resources.files("baselines.Custom.config") / "ippo_ff_mpe_simple_spread.yaml")),
         "ippo_rnn_mpe": (ippo_rnn_mpe, OmegaConf.load(resources.files("baselines.Custom.config") / "ippo_rnn_mpe_simple_spread.yaml")),
-        "mappo_rnn_mpe": (mappo_rnn_mpe, OmegaConf.load(resources.files("baselines.Custom.config") / "mappo_homogenous_rnn_mpe_simple_spread.yaml"))
+        "mappo_rnn_mpe": (mappo_rnn_mpe, OmegaConf.load(resources.files("baselines.Custom.config") / "mappo_rnn_mpe_simple_spread.yaml"))
     }
     
     parser = argparse.ArgumentParser()
