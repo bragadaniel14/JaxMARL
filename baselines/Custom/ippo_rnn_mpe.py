@@ -3,6 +3,15 @@ Based on PureJaxRL Implementation of PPO.
 
 Note, this file will only work for MPE environments with homogenous agents (e.g. Simple Spread).
 
+Functions:
+    - main(config): Train an IPPO-RNN agent and save to wandb
+    - plot(saved_path, max_steps, num_episodes, seed): Load a trained model from offline wandb 
+      and visualize it running in the environment
+
+Example usage for visualization:
+    from baselines.Custom import ippo_rnn_mpe
+    anim = ippo_rnn_mpe.plot(saved_path="wandb/offline-run-20251027_174612-g3qd2e3o")
+
 """
 
 import jax
@@ -20,9 +29,12 @@ from omegaconf import OmegaConf
 
 import jaxmarl
 from jaxmarl.wrappers.baselines import MPELogWrapper
+from baselines.Custom.simple_spread_visualizer import MPEVisualizer
 
 import wandb
 import functools
+import json
+from pathlib import Path
 
 
 class ScannedRNN(nn.Module):
@@ -446,6 +458,11 @@ def main(config):
         config["num_agents"] = env_kwargs.get("num_agents", 3)  # default 3
         config["num_landmarks"] = env_kwargs.get("num_landmarks", 3)  # default 3
     
+    # Set wandb run directory name with custom format
+    run_name = f"ippo_rnn_mpe-offline/agents{config.get('num_agents', 3)}-landmarks{config.get('num_landmarks', 3)}"
+    wandb_dir = Path(run_name)
+    wandb_dir.mkdir(parents=True, exist_ok=True)
+    config["WANDB_DIR"] = str(wandb_dir)
     wandb.init(
         entity=config["ENTITY"],
         project=config["PROJECT"],
@@ -453,6 +470,7 @@ def main(config):
         tags=["IPPO", "RNN"],
         config=config,
         mode=config["WANDB_MODE"],
+        dir=str(wandb_dir),  # Set the directory where wandb files are saved
         reinit=True  # Allow multiple wandb.init() calls in same process
     )
     
@@ -470,7 +488,18 @@ def main(config):
         with open("final_model_params.msgpack", "wb") as f:
             f.write(params_bytes)
         wandb.save("final_model_params.msgpack")  # Upload to W&B run folder
-        
+        # Save config with environment details to JSON for easy loading
+        config_to_save = {
+            "num_agents": config.get("num_agents", 3),
+            "num_landmarks": config.get("num_landmarks", 3),
+            "ENV_NAME": config["ENV_NAME"],
+            "GRU_HIDDEN_DIM": config["GRU_HIDDEN_DIM"],
+            "FC_DIM_SIZE": config["FC_DIM_SIZE"],
+            "algo_type": "ippo_rnn_mpe"
+        }
+        with open("env_config.json", "w") as f:
+            json.dump(config_to_save, f, indent=2)
+        wandb.save("env_config.json")
         # Log final metrics summary
         wandb.summary["num_agents"] = config.get("num_agents", 3)
         wandb.summary["num_landmarks"] = config.get("num_landmarks", 3)
@@ -479,6 +508,264 @@ def main(config):
     finally:
         # Always finish the wandb run to clean up properly
         wandb.finish()
+
+
+def load_params_from_path(saved_path):
+    """Load model parameters from a given path."""
+    saved_path = Path(saved_path)
+    if saved_path.name != "files":
+        saved_path = saved_path / "files"
+    saved_path = saved_path.resolve()
+    params_file = saved_path / "final_model_params.msgpack"
+    if not params_file.exists():
+        raise ValueError(f"Model parameters file not found: {params_file}")
+    
+    print(f"Loading model parameters from: {params_file}")
+    with open(params_file, "rb") as f:
+        params = flax.serialization.from_bytes(None, f.read())
+
+    env_config_file = saved_path / "env_config.json"
+    if not env_config_file.exists():
+        raise ValueError(f"Environment config file not found: {env_config_file}")
+    print(f"Loading environment config from: {env_config_file}")
+    with open(env_config_file, "r") as f:
+        env_config = json.load(f)
+    return params, env_config
+
+def evaluate_policy(params, env_config, num_eval_episodes=100, eval_seed=42, max_steps=100):
+    """
+    Evaluate a trained IPPO policy on fresh episodes using greedy (deterministic) actions.
+    
+    Args:
+        params: Trained model parameters
+        env_config: Environment configuration dict with keys like:
+                   'num_agents', 'num_landmarks', 'ENV_NAME', 'GRU_HIDDEN_DIM', 'FC_DIM_SIZE'
+        num_eval_episodes: Number of episodes to evaluate
+        eval_seed: Random seed for evaluation (different from training)
+        max_steps: Maximum steps per episode (default: 100)
+    
+    Returns:
+        tuple: (metrics dict, episode_returns array, episode_lengths array)
+    """
+    
+    # Build config dict for the network
+    config = {
+        "ENV_NAME": env_config.get("ENV_NAME", "MPE_simple_spread_v3"),
+        "GRU_HIDDEN_DIM": env_config.get("GRU_HIDDEN_DIM", 128),
+        "FC_DIM_SIZE": env_config.get("FC_DIM_SIZE", 128),
+        "ENV_KWARGS": {
+            "num_agents": env_config.get("num_agents", 3),
+            "num_landmarks": env_config.get("num_landmarks", 3)
+        }
+    }
+    
+    # Create environment with appropriate max_steps
+    env = MPELogWrapper(jaxmarl.make(config["ENV_NAME"], max_steps=max_steps, **config["ENV_KWARGS"]))
+    network = ActorCriticRNN(env.action_space(env.agents[0]).n, config)
+    
+    # Use single environment for evaluation (could also use multiple for speed)
+    num_envs = 1
+    num_actors = env.num_agents * num_envs
+    
+    # Storage for results
+    episode_returns = []
+    episode_lengths = []
+    
+    rng = jax.random.PRNGKey(eval_seed)
+    
+    for episode_idx in range(num_eval_episodes):
+        # Reset environment
+        print(f"Starting evaluation episode {episode_idx + 1}/{num_eval_episodes}...")
+        rng, reset_rng = jax.random.split(rng)
+        obs, env_state = env.reset(reset_rng)
+        
+        # Initialize hidden state
+        hstate = ScannedRNN.initialize_carry(num_actors, config["GRU_HIDDEN_DIM"])
+        
+        episode_reward = 0.0
+        episode_length = 0
+        done = False
+        
+        while not done and episode_length < max_steps:
+            # Prepare observation batch
+            obs_batch = jnp.stack([obs[a] for a in env.agents])
+            obs_batch = obs_batch.reshape(-1, obs_batch.shape[-1])
+            dones = jnp.zeros((num_actors,), dtype=jnp.float32)
+            ac_in = (obs_batch[None, :, :], dones[None, :])
+            
+            # Get action from policy
+            hstate, pi, value = network.apply(params, hstate, ac_in)
+            
+            # Deterministic action (greedy)
+            actions = jnp.argmax(pi.logits, axis=-1)
+            
+            # Actions shape is (1, num_agents), squeeze to (num_agents,)
+            actions = actions.squeeze()
+            
+            # Step environment
+            act_dict = {a: int(actions[i]) for i, a in enumerate(env.agents)}
+            rng, step_rng = jax.random.split(rng)
+            obs, env_state, reward, done_dict, info = env.step(step_rng, env_state, act_dict)
+            
+            # Accumulate rewards (sum over all agents)
+            episode_reward += sum(reward.values())
+            episode_length += 1
+            
+            # Check if episode is done
+            done = done_dict["__all__"]
+        
+        episode_returns.append(float(episode_reward))
+        episode_lengths.append(episode_length)
+        
+        if (episode_idx + 1) % 20 == 0:
+            print(f"Evaluated {episode_idx + 1}/{num_eval_episodes} episodes...")
+    
+    # Compute statistics
+    episode_returns = np.array(episode_returns)
+    episode_lengths = np.array(episode_lengths)
+    
+    metrics = {
+        "mean_return": episode_returns.mean(),
+        "std_return": episode_returns.std(),
+        "min_return": episode_returns.min(),
+        "max_return": episode_returns.max(),
+        "median_return": np.median(episode_returns),
+        "mean_episode_length": episode_lengths.mean(),
+        "std_episode_length": episode_lengths.std(),
+        "num_episodes": num_eval_episodes,
+        "max_steps": max_steps
+    }
+    
+    return metrics, episode_returns, episode_lengths
+
+
+def plot_simulation(saved_path="", max_steps=100, num_episodes=1, seed=42):
+    """
+    Load a trained IPPO-RNN model from an offline wandb path and visualize it.
+    
+    Args:
+        saved_path: Path to the offline wandb run directory, e.g., 
+                   "wandb/offline-run-20251008_121315-shellov1" or
+                   "wandb/offline-run-20251008_121315-shellov1/files"
+        max_steps: Maximum number of steps to simulate (default: 100)
+        num_episodes: Number of episodes to visualize (default: 1)
+        seed: Random seed for reproducibility (default: 42)
+    
+    Returns:
+        Animation object from MPEVisualizer
+    """
+    
+    # Normalize path - handle both "files" subdirectory and parent directory
+    saved_path = Path(saved_path)
+    if saved_path.name != "files":
+        saved_path = saved_path / "files"
+    
+    if not saved_path.exists():
+        raise ValueError(f"Path does not exist: {saved_path}")
+    
+    saved_path = saved_path.resolve()
+    # Load model parameters
+    params_file = saved_path / "final_model_params.msgpack"
+    if not params_file.exists():
+        raise ValueError(f"Model parameters file not found: {params_file}")
+    
+    print(f"Loading model parameters from: {params_file}")
+    with open(params_file, "rb") as f:
+        params = flax.serialization.from_bytes(None, f.read())
+    
+    # Try to load config from env_config.json first
+    config_file = saved_path / "env_config.json"
+    print(f"Loading environment config from: {config_file}")
+    with open(config_file, "r") as f:
+        env_config = json.load(f)
+    num_agents = env_config.get("num_agents", 3)
+    num_landmarks = env_config.get("num_landmarks", 3)
+    env_name = env_config.get("ENV_NAME", "MPE_simple_spread_v3")
+    gru_hidden_dim = env_config.get("GRU_HIDDEN_DIM", 128)
+    fc_dim_size = env_config.get("FC_DIM_SIZE", 128)
+
+    
+    print(f"Environment config: num_agents={num_agents}, num_landmarks={num_landmarks}")
+    
+    # Create configuration dict for the network
+    config = {
+        "ENV_NAME": env_name,
+        "GRU_HIDDEN_DIM": gru_hidden_dim,
+        "FC_DIM_SIZE": fc_dim_size,
+        "NUM_ENVS": 1,
+    }
+    
+    # Create environment
+    env_kwargs = {"num_agents": num_agents, "num_landmarks": num_landmarks}
+    env = MPELogWrapper(jaxmarl.make(env_name, max_steps=max_steps, **env_kwargs))
+    
+    # Create network
+    network = ActorCriticRNN(env.action_space(env.agents[0]).n, config)
+    
+    # Initialize RNG
+    rng = jax.random.PRNGKey(seed)
+    
+    # Run simulation for each episode
+    all_state_sequences = []
+    
+    for episode_idx in range(num_episodes):
+        print(f"Running episode {episode_idx + 1}/{num_episodes}...")
+        
+        # Reset environment
+        rng, reset_rng = jax.random.split(rng)
+        rngs = jax.random.split(reset_rng, config["NUM_ENVS"])
+        obs, env_state = jax.vmap(env.reset, in_axes=(0,))(rngs)
+        
+        # Initialize hidden state
+        num_actors = env.num_agents * config["NUM_ENVS"]
+        hstate = ScannedRNN.initialize_carry(num_actors, config["GRU_HIDDEN_DIM"])
+        
+        # Collect states
+        state_seq = [env_state.env_state]
+        
+        for step in range(max_steps):
+            # Batchify observations for RNN
+            obs_batch = jnp.stack([obs[a] for a in env.agents])
+            obs_batch = obs_batch.transpose(1, 0, 2).reshape(-1, obs_batch.shape[-1])
+            dones = jnp.zeros((num_actors,), dtype=jnp.float32)
+            ac_in = (obs_batch[None, :, :], dones[None, :])  # add time dim for scan
+            
+            # Get action from policy
+            hstate, pi, _ = network.apply(params, hstate, ac_in)
+            
+            # Sample actions
+            rng, action_rng = jax.random.split(rng)
+            actions = pi.sample(seed=action_rng)
+            
+            # Unbatch actions for environment
+            actions = actions.reshape(config["NUM_ENVS"], env.num_agents)
+            act_dict = {a: np.array(actions[:, i]) for i, a in enumerate(env.agents)}
+            
+            # Step environment
+            rng_step = jax.random.split(action_rng, config["NUM_ENVS"])
+            obs, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0))(
+                rng_step, env_state, act_dict
+            )
+            
+            state_seq.append(env_state.env_state)
+            
+            # Check if episode is done
+            if done["__all__"][0]:
+                print(f"Episode {episode_idx + 1} finished at step {step + 1}")
+                break
+        
+        all_state_sequences.append(state_seq)
+    
+    # Visualize the first episode (or all if needed)
+    print("Creating visualization...")
+    # Create base environment for visualization (without wrapper)
+    env_base = jaxmarl.make(env_name, **env_kwargs)
+    viz = MPEVisualizer(env_base, all_state_sequences[0])
+    anim = viz.animate()
+    
+    print("Visualization complete!")
+    return anim
+
 
 if __name__ == "__main__":
     main()
