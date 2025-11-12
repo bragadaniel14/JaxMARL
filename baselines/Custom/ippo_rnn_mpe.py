@@ -26,6 +26,7 @@ from flax.training.train_state import TrainState
 import distrax
 import hydra
 from omegaconf import OmegaConf
+import os
 
 import jaxmarl
 from jaxmarl.wrappers.baselines import MPELogWrapper
@@ -484,10 +485,11 @@ def main(config):
         final_train_state = out["runner_state"][0][0]  # (train_state, env_state, ...)
         params_bytes = flax.serialization.to_bytes(final_train_state.params)
         
-        # Save as artifact
-        with open("final_model_params.msgpack", "wb") as f:
+        # Save directly to wandb.run.dir to avoid symlink issues
+        params_path = os.path.join(wandb.run.dir, "final_model_params.msgpack")
+        with open(params_path, "wb") as f:
             f.write(params_bytes)
-        wandb.save("final_model_params.msgpack")  # Upload to W&B run folder
+        
         # Save config with environment details to JSON for easy loading
         config_to_save = {
             "num_agents": config.get("num_agents", 3),
@@ -497,9 +499,10 @@ def main(config):
             "FC_DIM_SIZE": config["FC_DIM_SIZE"],
             "algo_type": "ippo_rnn_mpe"
         }
-        with open("env_config.json", "w") as f:
+        config_path = os.path.join(wandb.run.dir, "env_config.json")
+        with open(config_path, "w") as f:
             json.dump(config_to_save, f, indent=2)
-        wandb.save("env_config.json")
+        
         # Log final metrics summary
         wandb.summary["num_agents"] = config.get("num_agents", 3)
         wandb.summary["num_landmarks"] = config.get("num_landmarks", 3)

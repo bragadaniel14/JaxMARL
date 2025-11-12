@@ -371,10 +371,10 @@ def main(config):
     final_train_state = jax.tree_map(lambda x: x[0], out["runner_state"][0])
     params_bytes = flax.serialization.to_bytes(final_train_state.params)
     
-    # Save as artifact
-    with open("final_model_params.msgpack", "wb") as f:
+    # Save directly to wandb.run.dir to avoid symlink issues
+    params_path = os.path.join(wandb.run.dir, "final_model_params.msgpack")
+    with open(params_path, "wb") as f:
         f.write(params_bytes)
-    wandb.save("final_model_params.msgpack")  # Upload to W&B run folder
     
     # Save config with environment details to JSON for easy loading
     config_to_save = {
@@ -384,9 +384,9 @@ def main(config):
         "ACTIVATION": config.get("ACTIVATION", "tanh"),
         "algo_type": "ippo_ff_mpe"
     }
-    with open("env_config.json", "w") as f:
+    config_path = os.path.join(wandb.run.dir, "env_config.json")
+    with open(config_path, "w") as f:
         json.dump(config_to_save, f, indent=2)
-    wandb.save("env_config.json")
     
     # Log final metrics summary
     wandb.summary["num_agents"] = config.get("num_agents", 3)

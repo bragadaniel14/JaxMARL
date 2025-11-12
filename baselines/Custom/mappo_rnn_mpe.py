@@ -21,6 +21,7 @@ import optax
 from flax.linen.initializers import constant, orthogonal
 from typing import Sequence, NamedTuple, Any, Tuple, Union, Dict
 import chex
+import os
 
 from flax.training.train_state import TrainState
 import distrax
@@ -579,14 +580,14 @@ def main(config):
         actor_params_bytes = flax.serialization.to_bytes(final_actor_train_state.params)
         critic_params_bytes = flax.serialization.to_bytes(final_critic_train_state.params)
 
-        # Save as artifacts
-        with open("final_actor_params.msgpack", "wb") as f:
+        # Save directly to wandb.run.dir to avoid symlink issues
+        actor_params_path = os.path.join(wandb.run.dir, "final_actor_params.msgpack")
+        with open(actor_params_path, "wb") as f:
             f.write(actor_params_bytes)
-        with open("final_critic_params.msgpack", "wb") as f:
+        
+        critic_params_path = os.path.join(wandb.run.dir, "final_critic_params.msgpack")
+        with open(critic_params_path, "wb") as f:
             f.write(critic_params_bytes)
-
-        wandb.save("final_actor_params.msgpack")
-        wandb.save("final_critic_params.msgpack")
         
         # Save config with environment details to JSON for easy loading
         config_to_save = {
@@ -597,9 +598,9 @@ def main(config):
             "FC_DIM_SIZE": config["FC_DIM_SIZE"],
             "algo_type": "mappo_rnn_mpe"
         }
-        with open("env_config.json", "w") as f:
+        config_path = os.path.join(wandb.run.dir, "env_config.json")
+        with open(config_path, "w") as f:
             json.dump(config_to_save, f, indent=2)
-        wandb.save("env_config.json")
         
         # Log final metrics summary
         wandb.summary["num_agents"] = config.get("num_agents", 3)
