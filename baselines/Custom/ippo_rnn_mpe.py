@@ -460,8 +460,8 @@ def main(config):
         config["num_landmarks"] = env_kwargs.get("num_landmarks", 3)  # default 3
     
     # Set wandb run directory name with custom format
-    run_name = f"ippo_rnn_mpe-offline/agents{config.get('num_agents', 3)}-landmarks{config.get('num_landmarks', 3)}"
-    wandb_dir = Path(run_name)
+    run_folder = config['WANDB_DIR']
+    wandb_dir = Path(run_folder)
     wandb_dir.mkdir(parents=True, exist_ok=True)
     config["WANDB_DIR"] = str(wandb_dir)
     wandb.init(
