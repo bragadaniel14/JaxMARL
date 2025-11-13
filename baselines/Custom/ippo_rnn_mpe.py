@@ -602,8 +602,8 @@ def evaluate_policy(params, env_config, num_eval_episodes=100, eval_seed=42, max
             # Deterministic action (greedy)
             actions = jnp.argmax(pi.logits, axis=-1)
             
-            # Actions shape is (1, num_agents), squeeze to (num_agents,)
-            actions = actions.squeeze()
+            # Actions shape is (1, num_agents), squeeze only the batch dimension
+            actions = actions.squeeze(axis=0)  # Now shape is (num_agents,) even if num_agents=1
             
             # Step environment
             act_dict = {a: int(actions[i]) for i, a in enumerate(env.agents)}
